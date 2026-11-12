@@ -9,3 +9,8 @@ __pycache__/
 .DS_Store
 /data/
 /reports/
+# Local backups and runtime databases
+*.bak*
+*.sqlite3*
+*.db
+*.db-*
