@@ -14,6 +14,7 @@ from .paper_database import initialize_paper_database, read_paper_database
 from .atomic_trade_settlement import settle_position
 from .sqlite_daily_risk import initialize_daily_risk_day, check_daily_risk_for_open
 from .sqlite_monitor_heartbeat import check_monitor_heartbeat_for_open, record_verified_equity_check
+from .monitor_liveness import monitor_is_running
 
 FEE_RATE = Decimal("0.001")       # Experimental fee, per side
 SLIPPAGE_RATE = Decimal("0.0005")  # Experimental adverse slippage, per side
@@ -112,6 +113,12 @@ def open_paper_position(db_path, position_id, direction, entry_price, stop_price
         fresh, heartbeat_message = check_monitor_heartbeat_for_open(conn, balance)
         if not fresh:
             raise RuntimeError(heartbeat_message)
+
+        # A fresh heartbeat is insufficient if the monitor has crashed.
+        if not monitor_is_running(path):
+            raise RuntimeError(
+                "Monitor process is not running. Paper entry blocked."
+            )
 
         # Both statements and the cash debit commit or roll back together.
         conn.execute(

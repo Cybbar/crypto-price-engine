@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from .sqlite_monitor_heartbeat import record_verified_equity_check
-
+from .paper_stop_loss import evaluate_stop_exit
 
 def revoke_heartbeat(database_path):
     """Fail closed after a detected monitor error; no auto-created database."""
@@ -28,8 +28,15 @@ def revoke_heartbeat(database_path):
             raise RuntimeError("Unexpected SQLite schema; cannot revoke heartbeat.")
         # If the table is missing, trade opening already fails closed; do not
         # silently treat an unexpected schema as a successful revocation.
-        conn.execute("DELETE FROM monitor_heartbeat WHERE id = 1")
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'monitor_heartbeat'"
+        ).fetchone()
 
+        if table_exists:
+            conn.execute(
+                "DELETE FROM monitor_heartbeat WHERE id = 1"
+            )
 
 def run_monitor(database_path, cycles=3, interval_seconds=5):
     """Run finite monitoring cycles; 0 cycles means run until interrupted.
@@ -51,7 +58,19 @@ def run_monitor(database_path, cycles=3, interval_seconds=5):
     count = 0
     while cycles == 0 or count < cycles:
         try:
+            # Fetch a verified BTC mark price and update account equity.
             snapshot = record_verified_equity_check(path)
+
+            # Check whether an open position has reached its stop.
+            stop_status, settlement_balance = evaluate_stop_exit(
+                path,
+                snapshot["mark_price"],
+            )
+
+            # Invalidate authorization after any settlement.
+            if stop_status in {"SETTLED", "ALREADY_CLOSED"}:
+                revoke_heartbeat(path)
+
         except Exception as exc:
             try:
                 revoke_heartbeat(path)
@@ -74,6 +93,14 @@ def run_monitor(database_path, cycles=3, interval_seconds=5):
             f"daily risk={status}",
             flush=True,
         )
+        if stop_status == "SETTLED":
+            print(
+                "AUTOMATIC PAPER STOP-LOSS EXECUTED | "
+                f"Balance: {settlement_balance} USDT | "
+                "Previous heartbeat revoked",
+                flush=True,
+            )
+
         if cycles == 0 or count < cycles:
             time.sleep(interval_seconds)
     return count
@@ -104,15 +131,20 @@ def self_test():
         assert approved
         print("Initial verified heartbeat: APPROVED")
 
-        open_paper_position(
-            db, "monitor001", "long", "100000", "99000", "0.001"
-        )
+        with patch(
+                "src.paper.atomic_trade_open.monitor_is_running",
+                return_value=True,
+        ):
+            open_paper_position(
+                db, "monitor001", "long",
+                "100000", "99000", "0.001",
+            )
         print("Fictional open position: RECORDED")
 
         with patch(
             "src.paper.live_equity_check.fetch_validated_mark_price",
             side_effect=[
-                (Decimal("99000"), 0.2),
+                (Decimal("99500"), 0.2),
                 (Decimal("80000"), 0.2),
             ],
         ):
